@@ -1,8 +1,8 @@
 /*!
 * @file Adafruit_ILI9341.c
-* 
+*
 * This is the documentation for Adafruit's ILI9341 driver for the
-* Arduino platform. 
+* Arduino platform.
 *
 * This library works with the Adafruit 2.8" Touch Shield V2 (SPI)
 *    http://www.adafruit.com/products/1651
@@ -12,7 +12,7 @@
 *    https://www.adafruit.com/product/1770
 * 2.2" 18-bit color TFT LCD display with microSD card breakout - ILI9340
 *    https://www.adafruit.com/product/1770
-* TFT FeatherWing - 2.4" 320x240 Touchscreen For All Feathers 
+* TFT FeatherWing - 2.4" 320x240 Touchscreen For All Feathers
 *    https://www.adafruit.com/product/3315
 *
 * These displays use SPI to communicate, 4 or 5 pins are required
@@ -53,7 +53,7 @@
 #define SSPI_WRITE32(a,l)        SSPI_WRITE(a,(l >> 24)); SSPI_WRITE(a,(l >> 16)); SSPI_WRITE(a,(l >> 8)); SSPI_WRITE(a,l)   ///< Software SPI write 32 bits
 #define SSPI_WRITE_PIXELS(a,c,l) for(unsigned int i=0; i<(l); i+=2){ SSPI_WRITE(a,((unsigned char*)(c))[i+1]); SSPI_WRITE(a,((unsigned char*)(c))[i]); }   ///< Software SPI write 'l' pixels (16 bits each)
 
-RT_L2_DATA unsigned int _width=0; 
+RT_L2_DATA unsigned int _width=0;
 RT_L2_DATA unsigned int _height=0;
 RT_L2_DATA int16_t cursor_x=0;
 RT_L2_DATA int16_t cursor_y=0;
@@ -181,7 +181,7 @@ void ILI9341_begin(rt_spim_t *spim)
 
     _width  = ILI9341_TFTWIDTH;
     _height = ILI9341_TFTHEIGHT;
-    
+
 }
 
 
@@ -245,9 +245,9 @@ void drawChar(rt_spim_t *spim,int16_t x, int16_t y, unsigned char c,
         }
 
 
-    } 
+    }
 
- 
+
 void writeChar(rt_spim_t *spim,uint8_t c) {
 
      if(c == '\n') {                        // Newline?
@@ -359,7 +359,7 @@ void lcd_pushPixels(rt_spim_t *spim,  uint16_t x, uint16_t y,uint16_t w,uint16_t
     setAddrWindow(spim,x, y, w, h); // Clipped area
 
     for(int i=0;i<h;i+=LINES_PER_CHUNK){
-    
+
         if((i+LINES_PER_CHUNK)<h-1)
         rt_spim_send(spim,    p+(w*i), (w)*LINES_PER_CHUNK*16, RT_SPIM_CS_KEEP, NULL);
         else
@@ -393,8 +393,8 @@ void writeFillRect(rt_spim_t *spim, unsigned short x, unsigned short y, unsigned
 }
 
 void SPI_DC_INIT(){
-    
-    rt_gpio_init(0, LCD_GPIO);    
+
+    rt_gpio_init(0, LCD_GPIO);
     rt_gpio_set_dir(0, 1<<LCD_GPIO, RT_GPIO_IS_OUT);
     rt_gpio_set_pin_value(0, LCD_GPIO, 0);
 
@@ -413,7 +413,7 @@ void SPI_DC_HIGH(){
 RT_L2_DATA unsigned char data[4] __attribute__((aligned(32)));
 
 
-void spiWrite(rt_spim_t *spim, unsigned char  d) 
+void spiWrite(rt_spim_t *spim, unsigned char  d)
 {
   data[0]=d;
   rt_spim_send(spim, data, 8, RT_SPIM_CS_AUTO, NULL);
