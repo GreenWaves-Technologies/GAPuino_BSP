@@ -1,0 +1,86 @@
+From 4e1a1d633e1203845f4678ff9741298fe44340f7 Mon Sep 17 00:00:00 2001
+From: Broadcom Wiced <broadcom_wiced@broadcom.local>
+Date: Wed, 11 Jan 2017 11:47:43 -0800
+Subject: [PATCH] Add FreeRTOS + Cortex-R support
+
+Adds Cortex-R support to FreeRTOS in OpenOCD. This allows for
+proper OS awareness to view thread information.
+
+---
+ src/rtos/FreeRTOS.c                | 13 +++++++++++++
+ src/rtos/rtos_standard_stackings.c | 28 ++++++++++++++++++++++++++++
+ 2 files changed, 41 insertions(+)
+
+diff --git a/src/rtos/FreeRTOS.c b/src/rtos/FreeRTOS.c
+index a141c50..18ce7d8 100644
+--- a/src/rtos/FreeRTOS.c
++++ b/src/rtos/FreeRTOS.c
+@@ -62,6 +62,19 @@ static const struct FreeRTOS_params FreeRTOS_params_list[] = {
+ 	&rtos_standard_Cortex_M3_stacking,	/* stacking_info */
+ 	},
+ 	{
++	"cortex_r4",			/* target_name */
++	4,						/* thread_count_width; */
++	4,						/* pointer_width; */
++	16,						/* list_next_offset; */
++	20,						/* list_width; */
++	8,						/* list_elem_next_offset; */
++	12,						/* list_elem_content_offset */
++	0,						/* thread_stack_offset; */
++	52,						/* thread_name_offset; */
++	&rtos_standard_Cortex_R4_stacking,	/* stacking_info */
++	},
++
++	{
+ 	"hla_target",			/* target_name */
+ 	4,						/* thread_count_width; */
+ 	4,						/* pointer_width; */
+diff --git a/src/rtos/rtos_standard_stackings.c b/src/rtos/rtos_standard_stackings.c
+index 3d6502e..75c5a07 100644
+--- a/src/rtos/rtos_standard_stackings.c
++++ b/src/rtos/rtos_standard_stackings.c
+@@ -45,6 +45,26 @@ static const struct stack_register_offset rtos_standard_Cortex_M3_stack_offsets[
+ 	{ 0x3c,                      32 },		/* xPSR */
+ };
+ 
++static const struct stack_register_offset rtos_standard_Cortex_R4_stack_offsets[] = {
++	{ 0x08, 32 },		/* r0  (a1)   */
++	{ 0x0c, 32 },		/* r1  (a2)  */
++	{ 0x10, 32 },		/* r2  (a3)  */
++	{ 0x14, 32 },		/* r3  (a4)  */
++	{ 0x18, 32 },		/* r4  (v1)  */
++	{ 0x1c, 32 },		/* r5  (v2)  */
++	{ 0x20, 32 },		/* r6  (v3)  */
++	{ 0x24, 32 },		/* r7  (v4)  */
++	{ 0x28, 32 },		/* r8  (a1)  */
++	{ 0x2c, 32 },		/* r9  (sb)  */
++	{ 0x30, 32 },		/* r10 (sl) */
++	{ 0x34, 32 },		/* r11 (fp) */
++	{ 0x38, 32 },		/* r12 (ip) */
++	{ REGISTER_IS_STACK_POINTER,   32 },		/* sp   */
++	{ 0x3c, 32 },		/* lr   */
++	{ 0x40, 32 },		/* pc   */
++	{ 0x44, 32 },		/* CSPR */
++};
++
+ 
+ 
+ static const struct stack_register_offset rtos_standard_NDS32_N1068_stack_offsets[] = {
+@@ -171,6 +191,14 @@ const struct rtos_register_stacking rtos_standard_Cortex_M3_stacking = {
+ 	rtos_standard_Cortex_M3_stack_offsets	/* register_offsets */
+ };
+ 
++const struct rtos_register_stacking rtos_standard_Cortex_R4_stacking = {
++	0x48,				/* stack_registers_size */
++	-1,					/* stack_growth_direction */
++	17,					/* num_output_registers */
++	rtos_generic_stack_align8,					/* stack_alignment */
++	rtos_standard_Cortex_R4_stack_offsets	/* register_offsets */
++};
++
+ 
+ const struct rtos_register_stacking rtos_standard_NDS32_N1068_stacking = {
+ 	0x90,				/* stack_registers_size */
+-- 
+2.2.2
+
