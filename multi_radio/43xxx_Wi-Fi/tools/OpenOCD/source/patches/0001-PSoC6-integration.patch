@@ -1,0 +1,2045 @@
+From bdcc4d03a131f22c1bda203a8b9dedf0338c91d8 Mon Sep 17 00:00:00 2001
+From: Broadcom Wiced <broadcom_wiced@broadcom.local>
+Date: Fri, 24 Feb 2017 13:39:43 -0800
+Subject: [PATCH] PSoC6 integration.
+
+---
+ src/flash/nor/Makefile.am        |    1 +
+ src/flash/nor/at91sam7.c         |    2 +-
+ src/flash/nor/core.c             |    6 +-
+ src/flash/nor/core.h             |    3 +
+ src/flash/nor/drivers.c          |    2 +
+ src/flash/nor/psoc6.c            | 1200 ++++++++++++++++++++++++++++++++++++++
+ src/helper/jim-nvp.c             |    5 +-
+ src/helper/jim-nvp.h             |    2 +-
+ src/jtag/aice/aice_transport.c   |   10 +-
+ src/jtag/drivers/cmsis_dap_usb.c |    6 +
+ src/jtag/hla/hla_tcl.c           |   10 +-
+ src/jtag/tcl.c                   |   10 +-
+ src/rtos/rtos.c                  |    7 +-
+ src/target/arm.h                 |    2 +-
+ src/target/arm_adi_v5.c          |   35 ++
+ src/target/arm_adi_v5.h          |    8 +-
+ src/target/armv4_5.c             |    4 +-
+ src/target/armv7m.c              |    4 +-
+ src/target/armv7m.h              |    2 +-
+ src/target/cortex_m.c            |   12 +
+ src/target/cortex_m.h            |    2 +
+ src/target/mips32.c              |    4 +-
+ src/target/mips32.h              |    2 +-
+ src/target/nds32_cmd.c           |    4 +-
+ src/target/target.c              |   15 +-
+ src/target/target.h              |    3 +-
+ src/target/target_type.h         |    2 +-
+ tcl/target/psoc4.cfg             |    2 +-
+ tcl/target/psoc5lp.cfg           |   32 +
+ tcl/target/psoc6.cfg             |  151 +++++
+ 30 files changed, 1503 insertions(+), 45 deletions(-)
+ create mode 100644 src/flash/nor/psoc6.c
+ create mode 100644 tcl/target/psoc5lp.cfg
+ create mode 100644 tcl/target/psoc6.cfg
+
+diff --git a/src/flash/nor/Makefile.am b/src/flash/nor/Makefile.am
+index c2a9d0c..578d5c7 100644
+--- a/src/flash/nor/Makefile.am
++++ b/src/flash/nor/Makefile.am
+@@ -50,6 +50,7 @@ NOR_DRIVERS = \
+ 	nrf51.c \
+ 	mrvlqspi.c \
+ 	psoc4.c \
++	psoc6.c \
+ 	sim3x.c \
+ 	xmc4xxx.c \
+ 	niietcm4.c
+diff --git a/src/flash/nor/at91sam7.c b/src/flash/nor/at91sam7.c
+index c7334ca..4731f08 100644
+--- a/src/flash/nor/at91sam7.c
++++ b/src/flash/nor/at91sam7.c
+@@ -669,7 +669,7 @@ static int at91sam7_erase_check(struct flash_bank *bank)
+ 		retval = target_blank_check_memory(target,
+ 				bank->base + bank->sectors[nSector].offset,
+ 				bank->sectors[nSector].size,
+-				&blank);
++				&blank, bank->erased_value);
+ 		if (retval != ERROR_OK) {
+ 			fast_check = 0;
+ 			break;
+diff --git a/src/flash/nor/core.c b/src/flash/nor/core.c
+index 4410d5c..13b1bf8 100644
+--- a/src/flash/nor/core.c
++++ b/src/flash/nor/core.c
+@@ -290,7 +290,7 @@ static int default_flash_mem_blank_check(struct flash_bank *bank)
+ 				goto done;
+ 
+ 			for (nBytes = 0; nBytes < chunk; nBytes++) {
+-				if (buffer[nBytes] != 0xFF) {
++				if (buffer[nBytes] != bank->erased_value) {
+ 					bank->sectors[i].is_erased = 0;
+ 					break;
+ 				}
+@@ -321,12 +321,12 @@ int default_flash_blank_check(struct flash_bank *bank)
+ 		uint32_t address = bank->base + bank->sectors[i].offset;
+ 		uint32_t size = bank->sectors[i].size;
+ 
+-		retval = target_blank_check_memory(target, address, size, &blank);
++		retval = target_blank_check_memory(target, address, size, &blank, bank->erased_value);
+ 		if (retval != ERROR_OK) {
+ 			fast_check = 0;
+ 			break;
+ 		}
+-		if (blank == 0xFF)
++		if (blank == bank->erased_value)
+ 			bank->sectors[i].is_erased = 1;
+ 		else
+ 			bank->sectors[i].is_erased = 0;
+diff --git a/src/flash/nor/core.h b/src/flash/nor/core.h
+index 726dd95..0ae0c41 100644
+--- a/src/flash/nor/core.h
++++ b/src/flash/nor/core.h
+@@ -87,6 +87,9 @@ struct flash_bank {
+ 	int chip_width; /**< Width of the chip in bytes (1,2,4 bytes) */
+ 	int bus_width; /**< Maximum bus width, in bytes (1,2,4 bytes) */
+ 
++	/** Erased value. Defaults to 0xFF. */
++	uint8_t erased_value;
++
+ 	/** Default padded value used, normally this matches the  flash
+ 	 * erased value. Defaults to 0xFF. */
+ 	uint8_t default_padded_value;
+diff --git a/src/flash/nor/drivers.c b/src/flash/nor/drivers.c
+index b2f05b8..c8df88f 100644
+--- a/src/flash/nor/drivers.c
++++ b/src/flash/nor/drivers.c
+@@ -61,6 +61,7 @@ extern struct flash_driver numicro_flash;
+ extern struct flash_driver nrf51_flash;
+ extern struct flash_driver mrvlqspi_flash;
+ extern struct flash_driver psoc4_flash;
++extern struct flash_driver psoc6_flash;
+ extern struct flash_driver sim3x_flash;
+ extern struct flash_driver jtagspi_flash;
+ extern struct flash_driver xmc4xxx_flash;
+@@ -110,6 +111,7 @@ static struct flash_driver *flash_drivers[] = {
+ 	&nrf51_flash,
+ 	&mrvlqspi_flash,
+ 	&psoc4_flash,
++    &psoc6_flash,
+ 	&sim3x_flash,
+ 	&jtagspi_flash,
+ 	&xmc4xxx_flash,
+diff --git a/src/flash/nor/psoc6.c b/src/flash/nor/psoc6.c
+new file mode 100644
+index 0000000..01dc9cb
+--- /dev/null
++++ b/src/flash/nor/psoc6.c
+@@ -0,0 +1,1200 @@
++/***************************************************************************
++© (2016), Cypress Semiconductor Corporation or a subsidiary of Cypress Semiconductor Corporation.  All rights reserved.
++This software, including source code, documentation and related materials (“Software”),  is owned by Cypress Semiconductor 
++Corporation or one of its subsidiaries (“Cypress”) and is protected by and subject to worldwide patent protection 
++(United States and foreign), United States copyright laws and international treaty provisions.  Therefore, you may use this
++Software only as provided in the license agreement accompanying the software package from which you obtained this Software (“EULA”).
++If no EULA applies, Cypress hereby grants you a personal, non-exclusive, non-transferable license to copy, modify, and 
++compile the Software source code solely for use in connection with Cypress’s integrated circuit products.  Any reproduction,
++modification, translation, compilation, or representation of this Software except as specified above is prohibited without the
++express written permission of Cypress.
++Disclaimer: THIS SOFTWARE IS PROVIDED AS-IS, WITH NO WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING, BUT NOT LIMITED TO,
++NONINFRINGEMENT, IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE. Cypress reserves the right to make
++changes to the Software without notice. Cypress does not assume any liability arising out of the application or use of the 
++Software or any product or circuit described in the Software. Cypress does not authorize its products for use in any products
++where a malfunction or failure of the Cypress product may reasonably be expected to result in significant property damage, 
++injury or death (“High Risk Product”). By including Cypress’s product in a High Risk Product, the manufacturer of such system
++or application assumes all risk of such use and in doing so agrees to indemnify Cypress against all liability.
++ ***************************************************************************/
++
++#ifdef HAVE_CONFIG_H
++#include "config.h"
++#endif
++
++#include "imp.h"
++#include <helper/binarybuffer.h>
++#include <jtag/jtag.h>
++#include <target/algorithm.h>
++#include <target/armv7m.h>
++
++/* device documets:
++ PSoC(R) 6: PSoC CY8C6XXX Family Datasheet
++	Document Number: 
++
++ PSoC CY8C6XXX Family PSoC(R) 6 Architecture TRM
++	Document No. 002-15785 Rev. ** xx/xx/2016
++
++ CY8C6XXX PSOC(R) 6 BLE 2 REGISTERS TECHNICAL REFERENCE MANUAL (TRM)
++	Document No. 002-12544 Rev. ** 05/09/2016
++
++ CY8C6XXX Programming Specifications
++	Document No.*/
++/*--------------------------------------------------------------------------------------------
++ *Base addresses
++ *--------------------------------------------------------------------------------------------
++ */
++/* 256kB System RAM */
++#define MEM_BASE_SRAM0							0x08000000u 
++/* 1024kB FLASH Main Region */
++#define MEM_BASE_FLASH							0x10000000u 
++/* Peripheral Interconnect */
++#define MEM_BASE_MMIO							0x40000000u
++/*  0x40200000: Core platform peripherals */
++#define MEM_BASE_MMIO2							(MEM_BASE_MMIO + 0x200000u) 
++/* 0x40230000: Base address for IPC structs */
++#define MEM_BASE_IPC							(MEM_BASE_MMIO2 + 0x30000u) 
++/* 0x40231000: Base address for IPC_INTR struct */
++#define MEM_BASE_IPCINTR						(MEM_BASE_MMIO2 + 0x31000u) 
++
++#define PSOC6_CHIP_PROT_UNKNOWN					0x0u
++#define PSOC6_CHIP_PROT_VIRGIN					0x1u
++#define PSOC6_CHIP_PROT_NORMAL  				0x2u
++#define PSOC6_CHIP_PROT_SECURE					0x3u
++#define PSOC6_CHIP_PROT_DEAD					0x4u
++
++/* Addresses for IPC_STRUCT and IPC_INTR_STRUCT */
++#define IPC_INTR_STRUCT_SIZE					0x20u
++#define IPC_STRUCT_SIZE							0x20u
++/* 0x40230000: CM0+ IPC_STRUCT absolute address */
++#define IPC_STRUCT0								MEM_BASE_IPC	
++/* 0x40230020: CM4 IPC_STRUCT absolute address */	         
++#define IPC_STRUCT1								(IPC_STRUCT0 + IPC_STRUCT_SIZE)    
++/* 0x40230040: DAP IPC_STRUCT absolute address */
++#define IPC_STRUCT2								(IPC_STRUCT1 + IPC_STRUCT_SIZE)    
++/* 0x40231000: IPC_INTR struct absolute address */
++#define IPC_INTR_STRUCT							MEM_BASE_IPCINTR                 
++
++#define FLASH_SECTOR_LENGTH						256u
++#define PSOC6_SPCIF_GEOMETRY					(MEM_BASE_MMIO2+0x5f00cu)
++
++/* Registers offsets in IPC_STRUCT[x]
++ * This register is used to acquire a lock. This register is NOT SW writable.*/
++#define IPC_STRUCT_ACQUIRE_OFFSET				0x00u	
++/* This field allows for the generation of notification events to the IPC interrupt structures. */
++#define IPC_STRUCT_NOTIFY_OFFSET				0x08u	
++/* This field holds a 32-bit data element that is associated with the IPC structure. */
++#define IPC_STRUCT_DATA_OFFSET					0x0Cu
++/* IPC lock status */	
++#define IPC_STRUCT_LOCK_STATUS_OFFSET			0x10u	
++
++/* Registers offsets in IPC_INTR_STRUCT
++ * IPC interrupt mask */
++#define IPC_INTR_STRUCT_INTR_IPC_MASK_OFFSET	0x08u
++/* Specifies if the lock is successfully acquired or not: '0': Not successfully acquired, '1': Successfully acquired.*/	
++#define IPC_STRUCT_ACQUIRE_SUCCESS_MSK	        0x80000000u
++/* Specifies if the lock is acquired. */
++#define IPC_STRUCT_LOCK_STATUS_ACQUIRED_MSK     0x80000000u 
++
++/* Misc
++ * Timeout attempts of IPC_STRUCT acuire*/
++#define IPC_STRUCT_ACQUIRE_TIMEOUT_ATTEMPTS		250u
++/* Timeout attempts of IPC_STRUCT data */
++#define IPC_STRUCT_DATA_TIMEOUT_ATTEMPTS		250u  
++/* 0x08001000: Address of SRAM where the API’s parameters are stored by SW. */
++#define SRAM_SCRATCH_ADDR						(MEM_BASE_SRAM0 + 0x00001000u) 
++#define ROW_SIZE								512u
++/* Timemout 10 ms */
++#define DELAY_10_MS							    10000u 
++
++/*--------------------------------------------------------------------------------------------
++ *SROM APIs
++ *--------------------------------------------------------------------------------------------
++ *SROM APIs masks
++ *[0]: 1 - arguments are passed in IPC.DATA. 0 - arguments are passed in SRAM*/
++#define MXS40_SROMAPI_DATA_LOCATION_MSK	        0x00000001u 
++/* Status Code: 4 bits [31:28] of the data register */
++#define MXS40_SROMAPI_STATUS_MSK				0xF0000000u 
++/* Status Code = 0xA */
++#define MXS40_SROMAPI_STAT_SUCCESS				0xA0000000u 
++
++/* Sys calls IDs (SROM API Op code)
++ * [31:24]: Opcode = 0x00; [0]: 1 - arguments are passed in IPC.DATA*/
++#define MXS40_SROMAPI_SILID_CODE				0x00000001u 
++/* [15:8]: ID type */
++#define MXS40_SROMAPI_SILID_TYPE_MSK	        0x0000FF00u 
++#define MXS40_SROMAPI_SILID_TYPE_ROL	        0x08u
++/* [15:8]: Family Id Hi */
++#define MXS40_SROMAPI_SILID_FAMID_HI_MSK        0x0000FF00u 
++#define MXS40_SROMAPI_SILID_FAMID_HI_ROR        0x08u
++ /* [7:0]: Family Id Lo */
++#define MXS40_SROMAPI_SILID_FAMID_LO_MSK        0x000000FFu
++#define MXS40_SROMAPI_SILID_FAMID_LO_ROR        0u
++/* [19:16]: Protection state */
++#define MXS40_SROMAPI_SILID_PROT_MSK	        0x000F0000u 
++#define MXS40_SROMAPI_SILID_PROT_ROR	        0x10u
++/* [15:8]: Silicon Id Hi */
++#define MXS40_SROMAPI_SILID_SILID_HI_MSK        0x0000FF00u 
++#define MXS40_SROMAPI_SILID_SILID_HI_ROR        0x08u
++/* [15:8]: Silicon Id Lo */
++#define MXS40_SROMAPI_SILID_SILID_LO_MSK        0x000000FFu 
++#define MXS40_SROMAPI_SILID_SILID_LO_ROR        0x00u
++/* [31:24]: Opcode = 0x06; [0]: 0 - arguments are passed in SRAM */
++#define MXS40_SROMAPI_PROGRAMROW_CODE	        0x06000100u 
++/* [31:24]: Opcode = 0x14; [0]: 0 - arguments are passed in SRAM */
++#define MXS40_SROMAPI_ERASESECTOR_CODE	        0x14000100u 
++/* [31:24]: Opcode = 0x1C; [0]: 0 - arguments are passed in SRAM */
++#define MXS40_SROMAPI_ERASEROW_CODE				0x1C000100u
++#define IPC_ID									2u
++#define LENGHT_SILICON_ID						16u
++#define SIZE_OF_STRING							32u
++
++/*Offset for data location/size and Integrity check*/
++#define DATA_LOCATION_OFFSET					0x04
++
++/*Property for data location/size and Integrity check*/
++#define DATA_LOCATION_PROPERTY					0x106
++
++/*Offset for flash address which will be programed*/
++#define FLASH_ADDRESS_OFFSET					0x08
++
++/*Offset for first data byte in SRAM*/
++#define DATA_OFFSET								0x10
++
++/*Offset for set pointer to the first data byte location*/
++#define POINTER_ON_FIRST_BYTE_LOCATION_OFFSET   0x0C
++
++#define VERIFY_OK(fn) hr = (fn); if ( hr != ERROR_OK ) break;
++
++struct Psoc6ChipDetails {
++	uint32_t id;
++	const char *type;
++	uint32_t flashSizeInKb;
++};
++
++/* list of PSoC 6 chips
++ * flashSizeInKb is not necessary as it can be decoded from SPCIF_GEOMETRY*/
++const struct Psoc6ChipDetails psoc6Devices[] = {
++    /* PSoC 6 BLE II */
++	{ 0xE2071100, "CY8C616FMI-BL603", .flashSizeInKb = 512 },
++	{ 0xE2081100, "CY8C616FMI-BL673", .flashSizeInKb = 512 },
++  	{ 0xE2091100, "CY8C616LQI-BL601", .flashSizeInKb = 512 },
++	{ 0xE20A1100, "CY8C616LQI-BL671", .flashSizeInKb = 512 },
++   	{ 0xE20B1100, "CY8C617FMI-BL603", .flashSizeInKb = 1024 },
++	{ 0xE20C1100, "CY8C617FMI-BLD73", .flashSizeInKb = 1024 },
++    { 0xE20D1100, "CY8C626FMI-BL603", .flashSizeInKb = 512 },
++	{ 0xE20E1100, "CY8C626BZI-BL604", .flashSizeInKb = 512 },
++    { 0xE20F1100, "CY8C626BZI-BL674", .flashSizeInKb = 512 },
++	{ 0xE2111100, "CY8C627BZI-BL604", .flashSizeInKb = 1024 },
++    { 0xE2121100, "CY8C627FMI-BLD73", .flashSizeInKb = 1024 },
++	{ 0xE2131100, "CY8C627BZI-BLD74", .flashSizeInKb = 1024 },
++    { 0xE2141100, "CY8C636BZI-BL604", .flashSizeInKb = 512 },
++	{ 0xE2151100, "CY8C636BZI-BL674", .flashSizeInKb = 512 },
++    { 0xE2161100, "CY8C636FMI-BL603", .flashSizeInKb = 512 },
++	{ 0xE2171100, "CY8C636FMI-BL673", .flashSizeInKb = 512 },
++    { 0xE2181100, "CY8C636LQI-BL601", .flashSizeInKb = 512 },
++	{ 0xE2191100, "CY8C636LQI-BL671", .flashSizeInKb = 512 },
++    { 0xE21A1100, "CY8C637BZI-BLD04", .flashSizeInKb = 1024 },
++	{ 0xE2011100, "CY8C637BZI-BLD74", .flashSizeInKb = 1024 },
++    { 0xE21C1100, "CY8C637FMI-BLD03", .flashSizeInKb = 1024 },
++	{ 0xE2021100, "CY8C637FMI-BLD73", .flashSizeInKb = 1024 },
++    { 0xE21E1100, "CY8C637LQI-BLD01", .flashSizeInKb = 1024 },
++	{ 0xE2031100, "CY8C637LQI-BLD71", .flashSizeInKb = 1024 },
++    { 0xE2041100, "CY8C68237FM-BLE", .flashSizeInKb = 1024 },
++	{ 0xE2051100, "CY8C68237BZ-BLE", .flashSizeInKb = 1024 },
++    
++    /* PSoC 6 M */
++    { 0xE2001100, "CY8C637BZI-MD76", .flashSizeInKb = 1024 },
++    { 0xE2201100, "CY8C616BZI-M606", .flashSizeInKb = 512 },
++	{ 0xE2211100, "CY8C616BZI-M676", .flashSizeInKb = 512 },
++    { 0xE2221100, "CY8C617BZI-MD76", .flashSizeInKb = 1024 },
++	{ 0xE2231100, "CY8C626BZI-M606", .flashSizeInKb = 512 },
++    { 0xE2241100, "CY8C627BZI-MD76", .flashSizeInKb = 1024 },
++	{ 0xE2251100, "CY8C636BZI-MD06", .flashSizeInKb = 512 },
++    { 0xE2261100, "CY8C636BZI-MD76", .flashSizeInKb = 512 },
++	{ 0xE2271100, "CY8C637BZI-MD06", .flashSizeInKb = 1024 },
++    
++    /* PSoC 6 BLE II - PSVP part number*/
++    { 0xe2000100, "CY8C622PSVP",  .flashSizeInKb = 1024 },
++};
++
++struct psoc6FlashBank {
++	uint32_t rowSize;
++	uint32_t userBankSize;
++	int probed;
++	uint32_t siliconId;
++	uint8_t chipProtection;
++	uint32_t flashSizeInKb;
++};
++
++static const struct Psoc6ChipDetails *psoc6_details_by_id(uint32_t siliconId)
++{
++	const struct Psoc6ChipDetails *p = psoc6Devices;
++    const struct Psoc6ChipDetails *chipInfo = NULL;
++	uint16_t i;
++	uint32_t id = siliconId;/* ignore die revision */
++    bool isExpectedSilicon = false; 
++    
++	for (i = 0; i < sizeof(psoc6Devices)/sizeof(psoc6Devices[0]); i++) 
++    {
++		if (p->id == id)
++        {
++            chipInfo = p;
++            isExpectedSilicon = true;
++            break;
++        }
++        p++;
++	}
++    if(!isExpectedSilicon)
++	{
++	LOG_INFO("Unknown PSoC 6 device silicon id 0x%08" PRIx32 ".", siliconId);
++    }
++	return chipInfo;
++}
++
++static const char *Psoc6DecodeChipProtection(uint8_t protection)
++{
++    char *protectType = calloc(SIZE_OF_STRING, sizeof(*protectType));
++	switch (protection) {
++	case PSOC6_CHIP_PROT_UNKNOWN:
++        strcpy(protectType, "protection UNKNOWN");
++        break;
++	case PSOC6_CHIP_PROT_VIRGIN:
++        strcpy(protectType, "protection VIRGIN");
++        break;
++	case PSOC6_CHIP_PROT_NORMAL:
++        strcpy(protectType, "protection NORMAL");
++        break;
++	case PSOC6_CHIP_PROT_SECURE:
++        strcpy(protectType, "protection SECURE");
++        break;
++	case PSOC6_CHIP_PROT_DEAD:
++        strcpy(protectType, "protection DEAD");
++        break;
++	default:
++		LOG_WARNING("Unknown protection state 0x%02" PRIx8 "", protection);
++        strcpy(protectType, "Not allowed");
++        break;
++	}
++      
++    return (protectType);
++}
++
++FLASH_BANK_COMMAND_HANDLER(psoc6_flash_bank_command)
++{
++	struct psoc6FlashBank *psoc6_info;
++	int hr = ERROR_OK;
++
++	if (CMD_ARGC < 6)
++	{
++		hr = ERROR_COMMAND_SYNTAX_ERROR;
++	}
++	else
++	{
++		psoc6_info = calloc(1, sizeof(struct psoc6FlashBank));
++		bank->driver_priv = psoc6_info;
++		psoc6_info->userBankSize = bank->size;
++	}
++	return hr;
++}
++
++
++/*------------------------------------------------------------------------------
++ SROM APIs basics
++--------------------------------------------------------------------------------
++******************************************************************************
++* Purpose:	Polls lock status of IPC structure
++* Parameter:
++* 			target - current target device
++* 			ipcId - Id of IPC structure
++* 								- 0: IPC_STRUCT0 (CM0+)
++* 								- 1: IPC_STRUCT1 (CM4)
++* 								- 2: IPC_STRUCT2 (DAP)
++* 			lockExpected - true if look state is expected, or false  if look state is not expected
++* 			timeOutAttempts - timeout
++* Return:
++* 		ERROR_OK: IPC structure locked successfully
++* 		ERROR_FAIL: Cannot lock IPC structure 
++*******************************************************************************/
++int Ipc_PollLockStatus(struct target *target, uint32_t ipcId, bool lockExpected, int timeOutAttempts)
++{
++  /* Poll lock status*/
++  int hr = ERROR_OK;
++  int attemptsElapsed = 0x00;
++  bool isExpectedStatus = false;
++  uint32_t readData;  
++  uint32_t ipcAddr = IPC_STRUCT0 + IPC_STRUCT_SIZE * ipcId;
++  do
++  {
++	   /* Check lock status*/
++	  hr = target_read_u32(target, ipcAddr + IPC_STRUCT_LOCK_STATUS_OFFSET, &readData);
++	  if (hr == ERROR_OK)
++	  {
++		  bool isLocked = (readData & IPC_STRUCT_LOCK_STATUS_ACQUIRED_MSK) != 0;
++		  isExpectedStatus = (lockExpected && isLocked) || (!lockExpected && !isLocked);
++	  }
++	  
++	  /* Check for timeout*/
++	  if (!isExpectedStatus)
++	  {  
++		  if (attemptsElapsed > timeOutAttempts)
++		  {
++			  LOG_ERROR("Timeout polling lock status of IPC_STRUCT");
++			  hr = ERROR_FAIL;
++			  break;
++		  }
++		  usleep(DELAY_10_MS);
++		  attemptsElapsed++;
++	  }
++  } while (!isExpectedStatus);
++  return hr;
++}
++
++
++/*******************************************************************************
++* Purpose:	Acquires MXS40 IPC structure
++* Parameter:
++* 			target - current target device
++* 			ipcId - Id of IPC structure
++* 								- 0: IPC_STRUCT0 (CM0+)
++* 								- 1: IPC_STRUCT1 (CM4)
++* 								- 2: IPC_STRUCT2 (DAP)
++* 			timeOutAttempts - timeout
++* Return:
++* 		ERROR_OK: IPC structure acquired successfully
++* 		ERROR_FAIL: Cannon acquire IPC structure
++*******************************************************************************/
++int Ipc_Acquire(struct target *target, char ipcId, int timeOutAttempts)
++{
++  int hr = ERROR_OK;
++  int attemptsElapsed = 0x00;
++  bool isAcquired = false;
++  uint32_t readData;
++  uint32_t ipcAddr = IPC_STRUCT0 + IPC_STRUCT_SIZE * ipcId;
++    
++  do
++  {
++	  /* Acquire the lock in DAP IPC struct (IPC_STRUCT.ACQUIRE).*/
++	  hr = target_write_u32(target, ipcAddr + IPC_STRUCT_ACQUIRE_OFFSET, IPC_STRUCT_ACQUIRE_SUCCESS_MSK);
++	  if (hr == ERROR_OK)
++	  {
++		  /* Check if data is writed on first step */
++		  hr = target_read_u32(target, ipcAddr + IPC_STRUCT_ACQUIRE_OFFSET, &readData);
++		  if (hr == ERROR_OK)
++		  {
++			  isAcquired = (readData & IPC_STRUCT_ACQUIRE_SUCCESS_MSK) != 0;
++		  }
++	  }
++	   /* Check for timeout */
++	  if (!isAcquired)
++	  {
++		  if (attemptsElapsed > timeOutAttempts)
++		  {
++			  LOG_ERROR("Timeout acquiring IPC_STRUCT");
++			  hr = ERROR_FAIL;
++			  break;
++		  }
++		  usleep(DELAY_10_MS);
++		  attemptsElapsed++;  
++	  }
++  } while (!isAcquired);
++
++  if (isAcquired)
++  {
++	  /* If IPC structure is acquired, the lock status should be set */
++	  hr = Ipc_PollLockStatus(target, ipcId, true, timeOutAttempts);
++  }
++  return hr;
++}
++
++
++/*******************************************************************************
++* Purpose:	Polls execution status of SROM API
++* Parameter:
++* 			target - current target device
++* 			address - Memory address of SROM API status word
++* 			timeOutAttempts - timeout
++*			dataOut - status word
++* Return:
++*			ERROR_OK: SROM API returned successful execution status
++*			ERROR_FAIL: SROM API execution failed
++*******************************************************************************/
++int PollSromApiStatus(struct target *target, int address, int timeOutAttempts, uint32_t *dataOut)
++{
++  /* Poll data from SRAM, returned after system call execution */
++  int hr = ERROR_OK;
++  int attemptsElapsed = 0x00;
++  bool isAcquired = false;
++
++  do
++  {
++	  /* Poll data */
++	  hr = target_read_u32(target, address, dataOut);
++	  if (hr == ERROR_OK)
++	  {
++		  isAcquired = (*dataOut & MXS40_SROMAPI_STATUS_MSK) == MXS40_SROMAPI_STAT_SUCCESS;
++	  }
++	  /* Check for timeout */
++	  if (!isAcquired)
++	  {
++		  if (attemptsElapsed > timeOutAttempts)
++		  {
++			  LOG_DEBUG("PollSromApiStatus - FAIL status - 0x%08x", (unsigned int)*dataOut);
++			  LOG_ERROR("Timeout waiting for SROM API execution complete");
++			  hr = ERROR_FAIL;
++			  break;
++		  }
++		  usleep(DELAY_10_MS);
++		  attemptsElapsed ++;
++	  }
++  } while (!isAcquired);
++
++  LOG_DEBUG("PollSromApiStatus - OK status - 0x%08x", (unsigned int)*dataOut);
++  return hr;
++}
++
++
++/*******************************************************************************
++*	Purpose:
++*			 			Calls SROM API
++*			 			SROM APIs are executed by invoking a system call & providing
++*			 			the corresponding arguments.
++*			 			System calls can be performed by CM0+, CM4 or DAP.
++*			 			Each of them have a reserved IPC structure (used as a mailbox) through which
++*			 			they can request CM0+ to perform a system call.
++*			 			Each one acquires the specific mailbox, writes the opcode and
++*			 			argument to the data field of the mailbox and notifies a dedicated
++*			 			IPC interrupt structure. This results in an NMI interrupt in M0+.
++* Parameter:
++* 			target - current target device
++* 			callIdAndParams - OpCode of SROM API and params (in case all params are in IPC structure)
++*			dataOut - status word
++* Return:
++*			ERROR_OK: SROM API returned successful execution status
++*			ERROR_FAIL: SROM API execution failed
++*******************************************************************************/
++int CallSromApi(struct target *target, uint32_t callIdAndParams, uint32_t *dataOut)
++{
++  int hr;
++  /* Check where the arguments for this API are located
++     [0]: 1 - arguments are passed in IPC.DATA. 0 - arguments are passed in SRAM */
++  bool isDataInRam = (callIdAndParams & MXS40_SROMAPI_DATA_LOCATION_MSK) == 0;
++  unsigned long IPC_STRUC = IPC_STRUCT2;
++  /* Acquire IPC_STRUCT[0] for CM0+ */
++  hr = Ipc_Acquire(target, IPC_ID, IPC_STRUCT_ACQUIRE_TIMEOUT_ATTEMPTS);
++  if (hr == ERROR_OK)
++  {
++	  /* Write to IPC_STRUCT0.DATA - Sys call ID and Parameters
++		 OR address in SRAM, where they are located */
++	  if (isDataInRam)
++	  {
++		  LOG_DEBUG("CallSromApi: isDataInRam = true: address -> 0x%x, data -> 0x%x", (unsigned int)(IPC_STRUC + IPC_STRUCT_DATA_OFFSET), SRAM_SCRATCH_ADDR);
++		  target_write_u32(target, (unsigned int)(IPC_STRUC + IPC_STRUCT_DATA_OFFSET), SRAM_SCRATCH_ADDR);
++	  }
++	  else
++	  {
++		  LOG_DEBUG("CallSromApi: isDataInRam = false: address -> 0x%x, data -> 0x%x", (unsigned int)(IPC_STRUC + IPC_STRUCT_DATA_OFFSET), callIdAndParams);
++		  target_write_u32(target, (unsigned int)(IPC_STRUC + IPC_STRUCT_DATA_OFFSET), callIdAndParams);
++	  }
++		  /* Enable notification interrupt of IPC_INTR_STRUCT0(CM0+) for IPC_STRUCT2 */
++		  target_write_u32(target, (IPC_INTR_STRUCT + IPC_INTR_STRUCT_INTR_IPC_MASK_OFFSET), 1 << (16 + IPC_ID));
++
++			  /* Notify to IPC_INTR_STRUCT0. IPC_STRUCT2.MASK <- Notify */
++		 target_write_u32(target, IPC_STRUC + IPC_STRUCT_NOTIFY_OFFSET, 1);
++
++				  /* Poll lock status */
++				  hr = Ipc_PollLockStatus(target, IPC_ID, false, IPC_STRUCT_ACQUIRE_TIMEOUT_ATTEMPTS);
++				  if (hr == ERROR_OK)
++				  {
++					  /* Poll Data byte */
++					  if (isDataInRam)
++					  {
++						  hr = PollSromApiStatus(target, SRAM_SCRATCH_ADDR, IPC_STRUCT_DATA_TIMEOUT_ATTEMPTS, dataOut);
++					  }
++					  else
++					  {
++						  hr = PollSromApiStatus(target, IPC_STRUC + IPC_STRUCT_DATA_OFFSET, IPC_STRUCT_DATA_TIMEOUT_ATTEMPTS, dataOut);
++					  }
++				  }
++			  }
++  return hr;
++}
++
++
++/*******************************************************************************
++* Purpose:	Get Silicon ID for connected target
++* Parameter:
++* 			target - current target device
++* 			siliconId - value for Silicon ID
++* 			protection - value for protected state
++* Return:
++* 		ERROR_OK: Resault of get silicon id operation is OK
++* 		ERROR_FAIL: Resault of get silicon id operation is FAIL
++*******************************************************************************/
++static int Psoc6GetSiliconId(struct target *target, uint32_t *siliconId, uint8_t *protection)
++{
++	int hr = 0;
++	uint32_t dataOut0, dataOut1;
++	uint32_t params;
++	uint32_t familyIdHi = 0x0;
++	uint32_t familyIdLo = 0x0;
++	uint32_t siliconIdHi = 0x0;
++	uint32_t siliconIdLo = 0x0;
++
++	/* Type 0: Get Family ID & Revision ID
++	   SRAM_SCRATCH: OpCode */
++	params = MXS40_SROMAPI_SILID_CODE + (MXS40_SROMAPI_SILID_TYPE_MSK & (0 << MXS40_SROMAPI_SILID_TYPE_ROL));
++	hr = CallSromApi(target, params, &dataOut0);
++	if (hr == ERROR_OK)
++	{
++		/* Type 1: Get Silicon ID and protection state */
++		params = (MXS40_SROMAPI_SILID_CODE + (MXS40_SROMAPI_SILID_TYPE_MSK & (1 << MXS40_SROMAPI_SILID_TYPE_ROL)));
++		hr = CallSromApi(target, params, &dataOut1);
++		if (hr == ERROR_OK)
++		{
++			familyIdHi = (dataOut0 &  MXS40_SROMAPI_SILID_FAMID_HI_MSK) >> MXS40_SROMAPI_SILID_FAMID_HI_ROR;	/* Family ID High */
++			familyIdLo = (dataOut0 &  MXS40_SROMAPI_SILID_FAMID_LO_MSK) >> MXS40_SROMAPI_SILID_FAMID_LO_ROR;	/* Family ID Low */
++			siliconIdHi = (dataOut1 &  MXS40_SROMAPI_SILID_SILID_HI_MSK) >> MXS40_SROMAPI_SILID_SILID_HI_ROR;	/* Silicon ID High */
++			siliconIdLo = (dataOut1 &  MXS40_SROMAPI_SILID_SILID_LO_MSK) >> MXS40_SROMAPI_SILID_SILID_LO_ROR;	/* Silicon ID Low */
++			*protection = (dataOut1 &  MXS40_SROMAPI_SILID_PROT_MSK) >> MXS40_SROMAPI_SILID_PROT_ROR;			/* Protection state */
++		}
++		else
++		{
++			LOG_ERROR("Get Silicon ID and protection state has failed results");
++		}
++	}
++	*siliconId = ((siliconIdHi & 0xFF) << 24) | ((siliconIdLo & 0xFF) << 16) | ((familyIdHi & 0xFF) << 8) | (familyIdLo & 0xFF);
++	return hr;
++}
++
++
++/*******************************************************************************
++* Purpose:	Check if bank of flash in protected state
++* Parameter:
++* 			bank - flash bank
++* Return:
++* 		ERROR_OK: Resault of check operation is OK
++* 		ERROR_FAIL: Resault of check operation is FAIL
++*******************************************************************************/
++static int Psoc6ProtectCheck(struct flash_bank *bank)
++{
++	LOG_INFO("Get protection state not work in OpenOCD");
++	return ERROR_OK;
++}
++
++
++/*******************************************************************************
++* Purpose:	Set protected state in bank of flash
++* Parameter:
++* 			bank - flash bank
++* 			set - protected value
++* 			first - first address with protected data
++* 			last - last address with protected data
++* Return:
++* 		ERROR_OK: Resault of protect operation is OK
++* 		ERROR_FAIL: Resault of protect operation is FAIL
++*******************************************************************************/
++static int Psoc6Protect(struct flash_bank *bank, int set, int first, int last)
++{
++	LOG_INFO("Protect for PSoC6 is not support in OpenOCD");
++	return ERROR_OK;
++}
++
++
++/*******************************************************************************
++* Purpose:	Detect device and get all main parameters
++* Parameter:
++* 			bank - flash bank
++* Return:
++* 		ERROR_OK: Resault of probe operation is OK
++* 		ERROR_FAIL: Resault of probe operation is FAIL
++*******************************************************************************/
++static int Psoc6Probe(struct flash_bank *bank)
++{
++	struct psoc6FlashBank *psoc6Info = bank->driver_priv;
++	struct target *target = bank->target;
++	uint32_t hr;
++	uint32_t flashSizeInKb = 0;
++	uint32_t maxFlashSizeInKb = 0;
++	uint32_t siliconId = 0;
++	uint32_t rowSize = 0;
++	uint8_t protection = 0;
++	uint32_t spcifGeometry = 0;
++
++	uint32_t haltStatus;
++
++	target_read_u32(target, 0xE000EDF0, &haltStatus);
++	LOG_DEBUG("Status HALT - 0x%x", haltStatus);
++	psoc6Info->probed = 0;
++	hr = target_read_u32(target, PSOC6_SPCIF_GEOMETRY, &spcifGeometry);
++	if (hr == ERROR_OK)
++	{
++		rowSize = ROW_SIZE;
++		flashSizeInKb = (FLASH_SECTOR_LENGTH * (((spcifGeometry >> 24) & 0xFF) + 1));
++		LOG_INFO("SPCIF geometry: %" PRIu32 " kb flash, row %" PRIu32 " bytes.", flashSizeInKb, rowSize);
++
++		/* Get silicon ID from target. */
++		hr = Psoc6GetSiliconId(target, &siliconId, &protection);
++		if (hr == ERROR_OK)
++		{
++			const struct Psoc6ChipDetails *details = psoc6_details_by_id(siliconId);
++			if (details)
++			{
++				LOG_INFO("%s device detected.", details->type);
++				if (flashSizeInKb == 0)
++				{
++					flashSizeInKb = details->flashSizeInKb;
++				}
++				else
++				{
++					if (flashSizeInKb != details->flashSizeInKb)
++					{
++						LOG_ERROR("Flash size mismatch");
++					}
++				}
++			}
++
++			psoc6Info->flashSizeInKb = flashSizeInKb;
++			psoc6Info->rowSize = rowSize;
++			psoc6Info->siliconId = siliconId;
++			psoc6Info->chipProtection = protection;
++
++			/* failed reading flash size or flash size invalid (early silicon),
++			default to max target family */
++			if (hr != ERROR_OK || flashSizeInKb == 0xffff || flashSizeInKb == 0) 
++			{
++				LOG_WARNING("PSoC 6 flash size failed, probe inaccurate - assuming %" PRIu32 " k flash",
++					maxFlashSizeInKb);
++				flashSizeInKb = maxFlashSizeInKb;
++			}
++
++			/* if the user sets the size manually then ignore the probed value
++			this allows us to work around devices that have a invalid flash size register value */
++			if (psoc6Info->userBankSize) 
++			{
++				LOG_INFO("ignoring flash probed value, using configured bank size");
++				flashSizeInKb = psoc6Info->userBankSize / 1024;
++			}
++
++			/* did we assign flash size? */
++			assert(flashSizeInKb != 0xffff);
++
++			/* calculate numbers of pages */
++			uint32_t num_rows = flashSizeInKb * 1024 / rowSize;
++
++			/* check that calculation result makes sense */
++			assert(num_rows > 0);
++
++			if (bank->sectors)
++			{
++				free(bank->sectors);
++				bank->sectors = NULL;
++			}
++
++			bank->base = MEM_BASE_FLASH;
++			bank->size = num_rows * rowSize;
++			bank->num_sectors = num_rows;
++			bank->sectors = malloc(sizeof(struct flash_sector) * num_rows);
++			/* This part doesn't follow the typical standard of 0xff
++			being the erased value.*/
++			bank->default_padded_value = bank->erased_value = 0x00;
++
++			uint32_t i;
++			for (i = 0; i < num_rows; i++)
++			{
++				bank->sectors[i].offset = i * rowSize;
++				bank->sectors[i].size = rowSize;
++				bank->sectors[i].is_erased = -1;
++				bank->sectors[i].is_protected = 1;
++			}
++
++			LOG_DEBUG("psoc6Info->flashSizeInKb-> 0x%x", psoc6Info->flashSizeInKb);
++			LOG_DEBUG("psoc6Info->rowSize-> 0x%x", psoc6Info->rowSize);
++			LOG_DEBUG("psoc6Info->siliconId	-> 0x%x", psoc6Info->siliconId);
++			LOG_DEBUG("psoc6Info->chipProtection-> 0x%x", psoc6Info->chipProtection);
++
++			LOG_DEBUG("bank->base -> 0x%x", bank->base);
++			LOG_DEBUG("bank->size -> 0x%x", bank->size);
++			LOG_DEBUG("bank->num_sectors-> 0x%x", bank->num_sectors);
++
++			psoc6Info->probed = 1;
++		}
++	}
++		
++	return hr;
++}
++
++
++/*******************************************************************************
++* Purpose:	Auto detect device and get all main parameters
++* Parameter:
++* 			bank - flash bank
++* Return:
++* 		ERROR_OK: Resault of probe operation is OK
++* 		ERROR_FAIL: Resault of probe operation is FAIL
++*******************************************************************************/
++static int Psoc6AutoProbe(struct flash_bank *bank)
++{
++	struct psoc6FlashBank *psoc6Info = bank->driver_priv;
++	int hr;
++
++	if (psoc6Info->probed)
++	{
++		hr = ERROR_OK;
++	}
++	else
++	{
++		hr = Psoc6Probe(bank);
++	}
++
++	return hr;
++}
++
++
++/*******************************************************************************
++* Purpose:	Erase sector operation for connected target
++* Parameter:
++* 			target - current target device
++* 			first - first address which will be erased
++* 			last - last sector which will be erased
++* Return:
++* 		ERROR_OK: Resault of Erase sector operation is OK
++* 		ERROR_FAIL: Resault of Erase sector operation is FAIL
++*******************************************************************************/
++static int EraseSector(struct target *target, int first, int last, uint32_t opcode)
++{
++	int hr = ERROR_OK;
++	int iterator_incrementer = -1;
++
++	switch (opcode)
++	{
++	case MXS40_SROMAPI_ERASEROW_CODE:
++		/* Page/row based. */
++		iterator_incrementer = 1;
++		break;
++	case MXS40_SROMAPI_ERASESECTOR_CODE:
++		/* Sector based. */
++		iterator_incrementer = FLASH_SECTOR_LENGTH * 1024 / ROW_SIZE;
++		break;
++	default:
++		LOG_ERROR("Unsupported opcode 0x%x", opcode);
++		return ERROR_FAIL;
++	}
++
++	assert(iterator_incrementer != -1);
++
++	LOG_DEBUG("first-> 0x%x, last-> 0x%x, opcode-> 0x%x", first, last, opcode);
++	LOG_DEBUG("incrementer-> 0x%x", iterator_incrementer);
++
++	/* Iterate over sectors (which are really rows/pages). */
++	for (int i = first; i <= last; i += iterator_incrementer)
++	{
++		int addr = MEM_BASE_FLASH + (i * ROW_SIZE);
++
++		/* Prepare batch request. Skip immediate responses in batch mode.
++		    SRAM_SCRATCH: OpCode */
++		hr = target_write_u32(target, SRAM_SCRATCH_ADDR, opcode);
++		if (hr != ERROR_OK)
++		{
++			break;
++		}
++
++		/* SRAM_SCRATCH + 0x04: Flash address to be erased (in 32-bit system address format) */
++		hr = target_write_u32(target, SRAM_SCRATCH_ADDR + DATA_LOCATION_OFFSET, addr);
++		if (hr != ERROR_OK)
++		{
++			break;
++		}
++
++		/* Send batch request */
++		uint32_t dataOut;
++		hr = CallSromApi(target, opcode, &dataOut);
++		if (hr != ERROR_OK)
++		{
++			LOG_ERROR("Sector \"%d\" from \"%d\" sectors are not erased.  Failed result for Erase operation.", i, last);
++			break;
++		}
++
++		LOG_DEBUG("Sector -> 0x%x is Erased", addr);
++	}
++	return hr;
++}
++
++
++/*******************************************************************************
++* Purpose:	Erase sector operation for connected target
++* Parameter:
++* 			bank - flash bank
++* 			first - first address which will be erased
++* 			last - last sector which will be erased
++* Return:
++* 		ERROR_OK: Resault of Erase sector operation is OK
++* 		ERROR_FAIL: Resault of Erase sector operation is FAIL
++*******************************************************************************/
++static int Psoc6Erase(struct flash_bank *bank, int first, int last)
++{
++	int hr = ERROR_OK;
++	struct target *target = bank->target;
++	struct psoc6FlashBank *psoc6Info = bank->driver_priv;
++	const uint32_t numRows = psoc6Info->flashSizeInKb * 1024 / psoc6Info->rowSize;
++	const uint32_t numRowsPerSector = FLASH_SECTOR_LENGTH * 1024 / psoc6Info->rowSize;
++
++	LOG_DEBUG("numRows-> 0x%x, numRowsPerSectors-> 0x%x", numRows, numRowsPerSector);
++	LOG_DEBUG("bank->num_sectors-> 0x%x", bank->num_sectors);
++	LOG_DEBUG("Calc-> 0x%x", numRows);
++	LOG_DEBUG("first-> 0x%x, last-> 0x%x", first, last);
++
++	/* Ensure last row is within the limits. */
++	if ((unsigned)(last) >= numRows)
++	{
++		LOG_INFO("Count of sector is more then real present");
++		return ERROR_FAIL;
++	}
++
++	/* "first" and "last" are inclusive 0-indexed row indices.
++	 * Erase area is processed in three parts: front, middle, end.
++	 * Front and end areas are unaligned with respect to the
++	 * sector boundary.  The middle area is aligned.  Do this
++	 * to take advantage of the sector erase function, as row
++	 * erasing is slow.  The algorithm assumes the sectors are
++	 * contiguous.
++	*/
++
++	int mod;
++	int new_first;
++
++	/* Front */
++	/* Calculate if first row is on a sector boundary. */
++	do
++	{
++		mod = first % numRowsPerSector;
++		if ( mod != 0 )
++		{
++			/* First row not on a sector boundary. */
++			/* Calculate which row is the next sector boundary. */
++			new_first = first + (numRowsPerSector - mod) - 1;
++			if ( last > new_first )
++			{
++				/* More rows after sector boundary. */
++				LOG_DEBUG("front");
++				/* Erase up to sector boundary. */
++				VERIFY_OK( EraseSector( target, first, new_first, MXS40_SROMAPI_ERASEROW_CODE ) );
++				first = new_first + 1;
++			}
++			else
++			{
++				/* Last row is within the current sector.
++				 * This is the front/end case. */
++			}
++		}
++		else
++		{
++			/* no front */
++			;
++		}
++
++		/* Calculate if last sector is on a sector boundary. */
++		mod = (last+1) % numRowsPerSector;
++
++		/* Middle. */
++		if ( (first % numRowsPerSector) == 0 )
++		{
++			/* First row on a sector boundary. */
++			if ( mod != 0 )
++			{
++				/* Last row not on a sector boundary. */
++				/* Round-down to sector boundary. */
++				new_first = last - (mod - 1);
++			}
++			else
++			{
++				/* Last row on a sector boundary. */
++				/* Both first and last are on sector boundaries. */
++				new_first = last + 1;
++			}
++
++			/* new_first is 0-indexed exclusive here. */
++
++			/* Check if the last row was within the same sector:
++			 * i.e. round-down the last row to the sector boundary.
++			 */
++			if ( new_first != first )
++			{
++				LOG_DEBUG("middle%s", mod != 0 ? "" : ", no end");
++				/* Erase sectors up to but excluding the sector containing the last row. */
++				VERIFY_OK( EraseSector( target, first, new_first - 1, MXS40_SROMAPI_ERASESECTOR_CODE ) );
++				first = new_first;
++			}
++		}
++
++		/* End. */
++		if ( mod != 0 )
++		{
++			LOG_DEBUG("end");
++			/* First row will be on a sector boundary, but last row will not. */
++			VERIFY_OK( EraseSector( target, first, last, MXS40_SROMAPI_ERASEROW_CODE ) );
++		}
++
++	} while (0);
++
++	return hr;
++}
++
++
++/*******************************************************************************
++* Purpose:	Erase  all sectors operation for connected target
++* Parameter:
++* 			bank - flash bank
++* Return:
++* 		ERROR_OK: Resault of Erase sector operation is OK
++* 		ERROR_FAIL: Resault of Erase sector operation is FAIL
++*******************************************************************************/
++static int psoc6_mass_erase(struct flash_bank *bank)
++{
++	int hr = ERROR_OK;
++	struct psoc6FlashBank *psoc6Info = bank->driver_priv;
++	int sectors = psoc6Info->flashSizeInKb * 1024 / psoc6Info->rowSize;
++
++	LOG_INFO("sectors-> 0x%x", sectors);
++
++	if (bank->target->state != TARGET_HALTED)
++	{
++		LOG_ERROR("Target not halted");
++		//hr = ERROR_TARGET_NOT_HALTED;
++	}
++
++	if (hr == ERROR_OK)
++	{
++		hr = Psoc6Erase(bank, 0, sectors - 1);
++	}
++	return hr;
++}
++
++
++/*******************************************************************************
++* Purpose:	Write row operation for connected target
++* Parameter:
++* 			target - current target device
++* 			address - start address for write data
++* 			buffer - buffer with all data which need write
++* 			count - lenght data
++* Return:
++* 		ERROR_OK: Resault of write row operation is OK
++* 		ERROR_FAIL: Resault of write row operation is FAIL
++*******************************************************************************/
++static int WriteRow(struct target *target, int address, const uint8_t * buffer, int count)
++{
++	int hr = ERROR_OK;
++	uint32_t dataOut;
++	/* 1. Prepare data for SROM API - write it to SRAM ---
++	   SRAM_SCRATCH: OpCode*/
++	hr = target_write_u32(target, SRAM_SCRATCH_ADDR, MXS40_SROMAPI_PROGRAMROW_CODE);
++	if (hr == ERROR_OK)
++	{
++
++		/* SRAM_SCRATCH + 0x04: Data location/size and Integrity check
++		   ---
++		   Bits[31:24]	Bits[23:16]		Bits[15:8]		Bits[7:0]
++		   xxxxxxxx		Verify row		Data location	Data size
++		   ---
++		   Verify row: 0-Data integrity check is not performed 1-Data integrity check is performed
++		   Data location : 0 – page latch , 1- SRAM
++		   Data size* – 0 – 8b ,1-16b , 2 -32b ,3 – 64b , 4 – 128b , 5 – 256 b , 6 – 512b , 7)
++		   Data size is ignored for S40 SONOS FLASH as the lowest granularity for program operation equals page size. */
++		hr = target_write_u32(target, SRAM_SCRATCH_ADDR + DATA_LOCATION_OFFSET, DATA_LOCATION_PROPERTY);
++		if (hr == ERROR_OK)
++		{
++			/* SRAM_SCRATCH + 0x08:
++			Flash address to be programmed (in 32-bit system address format) */
++			hr = target_write_u32(target, SRAM_SCRATCH_ADDR + FLASH_ADDRESS_OFFSET, address);
++			if (hr == ERROR_OK)
++			{
++				/* SRAM_SCRATCH + 0x10...n: Data word 0..n (Data provided should be proportional to data size provided, data to be programmed into LSB’s ) */
++				uint32_t dataRamAddr = SRAM_SCRATCH_ADDR + DATA_OFFSET;
++
++				/* SRAM_SCRATCH + 0x0C: Pointer to the first data byte location */
++				hr = target_write_u32(target, SRAM_SCRATCH_ADDR + POINTER_ON_FIRST_BYTE_LOCATION_OFFSET, dataRamAddr);
++				if (hr == ERROR_OK)
++				{
++					if (target_write_buffer(target, dataRamAddr, count, buffer) != ERROR_OK)
++					{
++						LOG_ERROR("Write to flash buffer failed");
++						hr = ERROR_FAIL;
++					}
++					else
++					{
++						LOG_DEBUG("PSOC6: WRITE_ROW: ADDRESS->0x%x, PARAMS->0x%x, DATARAMADDR->0x%x, COUNT->0x%x", address, DATA_LOCATION_PROPERTY, dataRamAddr, count);
++						/* 2. Call SROM API --- */
++						hr = CallSromApi(target, MXS40_SROMAPI_PROGRAMROW_CODE, &dataOut);
++					}
++				}
++			}
++		}
++	}
++	return hr;
++}
++
++
++/*******************************************************************************
++* Purpose:	Write operation for connected target
++* Parameter:
++* 			bank - flash bank
++* 			buffer - buffer with all data which need write
++* 			offset - offset of address where need to write data
++* 			count - lenght data
++* Return:
++* 		ERROR_OK: Resault of write operation is OK
++* 		ERROR_FAIL: Resault of write operation is FAIL
++*******************************************************************************/
++static int Psoc6Write(struct flash_bank *bank, const uint8_t *buffer, uint32_t offset, uint32_t count)
++{
++	int hr = ERROR_OK;
++	struct psoc6FlashBank *psoc6Info = bank->driver_priv;
++	struct target *target = bank->target;
++	uint32_t bytesRemaining = count;
++	uint8_t pageBuffer[psoc6Info->rowSize];
++	uint32_t address, size, sourceOffset, maxAdressSize;
++
++	LOG_DEBUG("PSOC6_WRITE: OFFSET -> 0x%x, COUNT -> 0x%x", offset, count);
++
++	sourceOffset = 0;
++	address = bank->base + offset;
++	maxAdressSize = (address + count);
++	while (address < maxAdressSize)
++	{
++		LOG_DEBUG("PSOC6_WRITE: SOURCE_OFFSET->0x%x, ADDRESS->0x%x, ADDRESS+COUNT->0x%x, BYTES_REMAINING->0x%x", sourceOffset, address, maxAdressSize, bytesRemaining);
++		LOG_INFO("Write data in 0x%x address", address);
++		size = psoc6Info->rowSize;
++		if (bytesRemaining < psoc6Info->rowSize)
++		{
++			memset(pageBuffer, 0x00, size);
++			memcpy(pageBuffer, &buffer[sourceOffset], bytesRemaining);
++			size = bytesRemaining;
++		}
++		else
++		{
++			memcpy(pageBuffer, &buffer[sourceOffset], size);
++		}
++
++		hr = WriteRow(target, address, pageBuffer, size);
++		if (hr != ERROR_OK)
++		{
++			break;
++		}
++
++		sourceOffset += size;
++		address = address + size;
++		bytesRemaining -= size;
++	}
++	
++	return hr;
++}
++
++/*******************************************************************************
++* Purpose:	Get information about connected target
++* Parameter:
++* 			bank - flash bank
++* 			buf - buffer all information
++* 			buf_size - size for buffer
++* Return:
++* 		ERROR_OK: Resault of get info operation operation is OK
++* 		ERROR_FAIL: Resault of get info operation operation is FAIL
++*******************************************************************************/
++static int GetPsoc6Info(struct flash_bank *bank, char *buf, int buf_size)
++{
++	int hr;
++	struct psoc6FlashBank *psoc6Info = bank->driver_priv;
++	int printed = 0;
++	if (psoc6Info->probed == 0)
++	{
++		hr = ERROR_FAIL;
++	}
++	else
++	{
++		const struct Psoc6ChipDetails *details = psoc6_details_by_id(psoc6Info->siliconId);
++		if (details)
++		{
++			uint32_t chip_revision = psoc6Info->siliconId & 0xffffffff;
++			printed = snprintf(buf, buf_size, "PSoC 6 %s rev 0x%04" PRIx32 " ", details->type, chip_revision);
++		}
++		else
++		{
++			printed = snprintf(buf, buf_size, "PSoC 6 silicon id 0x%x", psoc6Info->siliconId);
++		}
++
++		buf += printed;
++		buf_size -= printed;
++
++		const char *prot_txt = Psoc6DecodeChipProtection(psoc6Info->chipProtection);
++		uint32_t size_in_kb = bank->size / 1024;
++		snprintf(buf, buf_size, " flash %" PRIu32 " kb %s", size_in_kb, prot_txt);
++
++		hr = ERROR_OK;
++	}
++	return hr;
++}
++
++COMMAND_HANDLER(psoc6_handle_mass_erase_command)
++{
++	LOG_INFO("psoc6_handle_mass_erase_command function");
++	int hr = ERROR_OK;
++	if (CMD_ARGC < 1)
++	{
++		hr = ERROR_COMMAND_SYNTAX_ERROR;
++	}
++
++	if (hr == ERROR_OK)
++	{
++		struct flash_bank *bank;
++		hr = CALL_COMMAND_HANDLER(flash_command_get_bank, 0, &bank);
++		if (hr == ERROR_OK)
++		{
++			hr = psoc6_mass_erase(bank);
++			if (hr == ERROR_OK)
++				command_print(CMD_CTX, "psoc mass erase complete");
++			else
++				command_print(CMD_CTX, "psoc mass erase failed");
++		}
++		else
++		{
++			LOG_DEBUG("psoc get bank failed");
++		}
++	}
++	return hr;
++}
++
++static const struct command_registration psoc6_exec_command_handlers[] = {
++	{
++		.name = "mass_erase",
++		.handler = psoc6_handle_mass_erase_command,
++		.mode = COMMAND_EXEC,
++		.usage = "bank_id",
++		.help = "Erase entire flash device.",
++	},
++	COMMAND_REGISTRATION_DONE
++};
++
++static const struct command_registration psoc6_command_handlers[] = {
++	{
++		.name = "psoc6",
++		.mode = COMMAND_ANY,
++		.help = "PSoC 6 flash command group",
++		.usage = "",
++		.chain = psoc6_exec_command_handlers,
++	},
++	COMMAND_REGISTRATION_DONE
++};
++
++struct flash_driver psoc6_flash = {
++	.name = "psoc6",
++	.commands = psoc6_command_handlers,
++	.flash_bank_command = psoc6_flash_bank_command,
++	.erase = Psoc6Erase,
++	.protect = Psoc6Protect,
++	.write = Psoc6Write,
++	.read = default_flash_read,
++	.probe = Psoc6Probe,
++	.auto_probe = Psoc6AutoProbe,
++	.erase_check = default_flash_blank_check,
++	.protect_check = Psoc6ProtectCheck,
++	.info = GetPsoc6Info,
++};
+diff --git a/src/helper/jim-nvp.c b/src/helper/jim-nvp.c
+index 4602a8d..d13bdfb 100644
+--- a/src/helper/jim-nvp.c
++++ b/src/helper/jim-nvp.c
+@@ -205,7 +205,7 @@ int Jim_GetOpt_Obj(Jim_GetOptInfo *goi, Jim_Obj **puthere)
+ 		return JIM_ERR;
+ }
+ 
+-int Jim_GetOpt_String(Jim_GetOptInfo *goi, char **puthere, int *len)
++int Jim_GetOpt_String(Jim_GetOptInfo *goi, const char **puthere, int *len)
+ {
+ 	int r;
+ 	Jim_Obj *o;
+@@ -215,8 +215,7 @@ int Jim_GetOpt_String(Jim_GetOptInfo *goi, char **puthere, int *len)
+ 	if (r == JIM_OK) {
+ 		cp = Jim_GetString(o, len);
+ 		if (puthere) {
+-			/* remove const */
+-			*puthere = (char *)(cp);
++			*puthere = cp;
+ 		}
+ 	}
+ 	return r;
+diff --git a/src/helper/jim-nvp.h b/src/helper/jim-nvp.h
+index 05d79c4..ca382dd 100644
+--- a/src/helper/jim-nvp.h
++++ b/src/helper/jim-nvp.h
+@@ -245,7 +245,7 @@ int Jim_GetOpt_Obj(Jim_GetOptInfo *goi, Jim_Obj **puthere);
+  * \param puthere - where param is put
+  * \param len     - return its length
+  */
+-int Jim_GetOpt_String(Jim_GetOptInfo *goi, char **puthere, int *len);
++int Jim_GetOpt_String(Jim_GetOptInfo *goi, const char **puthere, int *len);
+ 
+ /** Remove argv[0] as double.
+  *
+diff --git a/src/jtag/aice/aice_transport.c b/src/jtag/aice/aice_transport.c
+index f3012bb..4c2f343 100644
+--- a/src/jtag/aice/aice_transport.c
++++ b/src/jtag/aice/aice_transport.c
+@@ -90,11 +90,13 @@ static int jim_aice_newtap_cmd(Jim_GetOptInfo *goi)
+ 		free(pTap);
+ 		return JIM_ERR;
+ 	}
+-	Jim_GetOpt_String(goi, &cp, NULL);
+-	pTap->chip = strdup(cp);
+ 
+-	Jim_GetOpt_String(goi, &cp, NULL);
+-	pTap->tapname = strdup(cp);
++	const char *tmp;
++	Jim_GetOpt_String(goi, &tmp, NULL);
++	pTap->chip = strdup(tmp);
++
++	Jim_GetOpt_String(goi, &tmp, NULL);
++	pTap->tapname = strdup(tmp);
+ 
+ 	/* name + dot + name + null */
+ 	x = strlen(pTap->chip) + 1 + strlen(pTap->tapname) + 1;
+diff --git a/src/jtag/drivers/cmsis_dap_usb.c b/src/jtag/drivers/cmsis_dap_usb.c
+index ff8b8ff..8e8ee30 100644
+--- a/src/jtag/drivers/cmsis_dap_usb.c
++++ b/src/jtag/drivers/cmsis_dap_usb.c
+@@ -519,7 +519,9 @@ static int cmsis_dap_swd_run_queue(void)
+ {
+ 	uint8_t *buffer = cmsis_dap_handle->packet_buffer;
+ 
++#if 0
+ 	LOG_DEBUG("Executing %d queued transactions", pending_transfer_count);
++#endif
+ 
+ 	if (queued_retval != ERROR_OK) {
+ 		LOG_DEBUG("Skipping due to previous errors: %d", queued_retval);
+@@ -539,10 +541,12 @@ static int cmsis_dap_swd_run_queue(void)
+ 		uint8_t cmd = pending_transfers[i].cmd;
+ 		uint32_t data = pending_transfers[i].data;
+ 
++#if 0
+ 		LOG_DEBUG("%s %s reg %x %"PRIx32,
+ 				cmd & SWD_CMD_APnDP ? "AP" : "DP",
+ 				cmd & SWD_CMD_RnW ? "read" : "write",
+ 			  (cmd & SWD_CMD_A32) >> 1, data);
++#endif
+ 
+ 		/* When proper WAIT handling is implemented in the
+ 		 * common SWD framework, this kludge can be
+@@ -597,7 +601,9 @@ static int cmsis_dap_swd_run_queue(void)
+ 			uint32_t tmp = data;
+ 			idx += 4;
+ 
++#if 0
+ 			LOG_DEBUG("Read result: %"PRIx32, data);
++#endif
+ 
+ 			/* Imitate posted AP reads */
+ 			if ((pending_transfers[i].cmd & SWD_CMD_APnDP) ||
+diff --git a/src/jtag/hla/hla_tcl.c b/src/jtag/hla/hla_tcl.c
+index 20082f3..7b7ae0a 100644
+--- a/src/jtag/hla/hla_tcl.c
++++ b/src/jtag/hla/hla_tcl.c
+@@ -100,11 +100,13 @@ static int jim_hl_newtap_cmd(Jim_GetOptInfo *goi)
+ 		free(pTap);
+ 		return JIM_ERR;
+ 	}
+-	Jim_GetOpt_String(goi, &cp, NULL);
+-	pTap->chip = strdup(cp);
+ 
+-	Jim_GetOpt_String(goi, &cp, NULL);
+-	pTap->tapname = strdup(cp);
++	const char *tmp;
++	Jim_GetOpt_String(goi, &tmp, NULL);
++	pTap->chip = strdup(tmp);
++
++	Jim_GetOpt_String(goi, &tmp, NULL);
++	pTap->tapname = strdup(tmp);
+ 
+ 	/* name + dot + name + null */
+ 	x = strlen(pTap->chip) + 1 + strlen(pTap->tapname) + 1;
+diff --git a/src/jtag/tcl.c b/src/jtag/tcl.c
+index c916fb1..ac3f4de 100644
+--- a/src/jtag/tcl.c
++++ b/src/jtag/tcl.c
+@@ -533,11 +533,13 @@ static int jim_newtap_cmd(Jim_GetOptInfo *goi)
+ 		free(pTap);
+ 		return JIM_ERR;
+ 	}
+-	Jim_GetOpt_String(goi, &cp, NULL);
+-	pTap->chip = strdup(cp);
+ 
+-	Jim_GetOpt_String(goi, &cp, NULL);
+-	pTap->tapname = strdup(cp);
++	const char *tmp;
++	Jim_GetOpt_String(goi, &tmp, NULL);
++	pTap->chip = strdup(tmp);
++
++	Jim_GetOpt_String(goi, &tmp, NULL);
++	pTap->tapname = strdup(tmp);
+ 
+ 	/* name + dot + name + null */
+ 	x = strlen(pTap->chip) + 1 + strlen(pTap->tapname) + 1;
+diff --git a/src/rtos/rtos.c b/src/rtos/rtos.c
+index 0cabc57..2f638da 100644
+--- a/src/rtos/rtos.c
++++ b/src/rtos/rtos.c
+@@ -114,8 +114,9 @@ int rtos_set_wipe(Jim_GetOptInfo *goi, struct target *target)
+ int rtos_create(Jim_GetOptInfo *goi, struct target *target)
+ {
+ 	int x;
+-	char *cp;
++	const char *cp;
+ 	struct Jim_Obj *res;
++	int e;
+ 
+ 	if (!goi->isconfigure && goi->argc != 0) {
+ 		Jim_WrongNumArgs(goi->interp, goi->argc, goi->argv, "NO PARAMS");
+@@ -124,7 +125,9 @@ int rtos_create(Jim_GetOptInfo *goi, struct target *target)
+ 
+ 	os_free(target);
+ 
+-	Jim_GetOpt_String(goi, &cp, NULL);
++	e = Jim_GetOpt_String(goi, &cp, NULL);
++	if (e != JIM_OK)
++		return e;
+ 
+ 	if (0 == strcmp(cp, "auto")) {
+ 		/* Auto detect tries to look up all symbols for each RTOS,
+diff --git a/src/target/arm.h b/src/target/arm.h
+index 27636cc..5aa759d 100644
+--- a/src/target/arm.h
++++ b/src/target/arm.h
+@@ -233,7 +233,7 @@ int armv4_5_run_algorithm_inner(struct target *target,
+ int arm_checksum_memory(struct target *target,
+ 		uint32_t address, uint32_t count, uint32_t *checksum);
+ int arm_blank_check_memory(struct target *target,
+-		uint32_t address, uint32_t count, uint32_t *blank);
++		uint32_t address, uint32_t count, uint32_t *blank, uint8_t erased_value);
+ 
+ void arm_set_cpsr(struct arm *arm, uint32_t cpsr);
+ struct reg *arm_reg_current(struct arm *arm, unsigned regnum);
+diff --git a/src/target/arm_adi_v5.c b/src/target/arm_adi_v5.c
+index 6efc0af..e385161 100644
+--- a/src/target/arm_adi_v5.c
++++ b/src/target/arm_adi_v5.c
+@@ -1352,6 +1352,41 @@ static int dap_info_command(struct command_context *cmd_ctx,
+ 	return ERROR_OK;
+ }
+ 
++int adiv5_jim_configure(struct target *target, Jim_GetOptInfo *goi)
++{
++	struct adiv5_private_config *pc;
++	const char *arg;
++	jim_wide ap_num;
++	int e;
++
++	/* check if argv[0] is for us */
++	arg = Jim_GetString(goi->argv[0], NULL);
++	if (strcmp(arg, "-ap-num"))
++		return JIM_CONTINUE;
++
++	e = Jim_GetOpt_String(goi, &arg, NULL);
++	if (e != JIM_OK)
++		return e;
++
++	if (goi->argc == 0) {
++		Jim_WrongNumArgs(goi->interp, goi->argc, goi->argv, "-ap-num ?ap-number? ...");
++		return JIM_ERR;
++	}
++
++	e = Jim_GetOpt_Wide(goi, &ap_num);
++	if (e != JIM_OK)
++		return e;
++
++	if (target->private_config == NULL) {
++		pc = calloc(1, sizeof(struct adiv5_private_config));
++		target->private_config = pc;
++		pc->ap_num = ap_num;
++	}
++
++
++	return JIM_OK;
++}
++
+ COMMAND_HANDLER(handle_dap_info_command)
+ {
+ 	struct target *target = get_current_target(CMD_CTX);
+diff --git a/src/target/arm_adi_v5.h b/src/target/arm_adi_v5.h
+index fed25ec..d2ef8d1 100644
+--- a/src/target/arm_adi_v5.h
++++ b/src/target/arm_adi_v5.h
+@@ -493,4 +493,10 @@ int dap_to_jtag(struct target *target);
+ 
+ extern const struct command_registration dap_command_handlers[];
+ 
+-#endif
++struct adiv5_private_config {
++	int ap_num;
++};
++
++extern int adiv5_jim_configure(struct target *target, Jim_GetOptInfo *goi);
++
++#endif /* OPENOCD_TARGET_ARM_ADI_V5_H */
+diff --git a/src/target/armv4_5.c b/src/target/armv4_5.c
+index 46fa2e4..a3a3ec9 100644
+--- a/src/target/armv4_5.c
++++ b/src/target/armv4_5.c
+@@ -1509,7 +1509,7 @@ int arm_checksum_memory(struct target *target,
+  *
+  */
+ int arm_blank_check_memory(struct target *target,
+-	uint32_t address, uint32_t count, uint32_t *blank)
++	uint32_t address, uint32_t count, uint32_t *blank, uint8_t erased_value)
+ {
+ 	struct working_area *check_algorithm;
+ 	struct reg_param reg_params[3];
+@@ -1558,7 +1558,7 @@ int arm_blank_check_memory(struct target *target,
+ 	buf_set_u32(reg_params[1].value, 0, 32, count);
+ 
+ 	init_reg_param(&reg_params[2], "r2", 32, PARAM_IN_OUT);
+-	buf_set_u32(reg_params[2].value, 0, 32, 0xff);
++	buf_set_u32(reg_params[2].value, 0, 32, erased_value);
+ 
+ 	/* armv4 must exit using a hardware breakpoint */
+ 	if (arm->is_armv4)
+diff --git a/src/target/armv7m.c b/src/target/armv7m.c
+index 15de8cd..b8583cf 100644
+--- a/src/target/armv7m.c
++++ b/src/target/armv7m.c
+@@ -762,7 +762,7 @@ cleanup:
+ 
+ /** Checks whether a memory region is zeroed. */
+ int armv7m_blank_check_memory(struct target *target,
+-	uint32_t address, uint32_t count, uint32_t *blank)
++	uint32_t address, uint32_t count, uint32_t *blank, uint8_t erased_value)
+ {
+ 	struct working_area *erase_check_algorithm;
+ 	struct reg_param reg_params[3];
+@@ -801,7 +801,7 @@ int armv7m_blank_check_memory(struct target *target,
+ 	buf_set_u32(reg_params[1].value, 0, 32, count);
+ 
+ 	init_reg_param(&reg_params[2], "r2", 32, PARAM_IN_OUT);
+-	buf_set_u32(reg_params[2].value, 0, 32, 0xff);
++	buf_set_u32(reg_params[2].value, 0, 32, erased_value);
+ 
+ 	retval = target_run_algorithm(target,
+ 			0,
+diff --git a/src/target/armv7m.h b/src/target/armv7m.h
+index 65a2ef0..95ad21c 100644
+--- a/src/target/armv7m.h
++++ b/src/target/armv7m.h
+@@ -225,7 +225,7 @@ int armv7m_restore_context(struct target *target);
+ int armv7m_checksum_memory(struct target *target,
+ 		uint32_t address, uint32_t count, uint32_t *checksum);
+ int armv7m_blank_check_memory(struct target *target,
+-		uint32_t address, uint32_t count, uint32_t *blank);
++		uint32_t address, uint32_t count, uint32_t *blank, uint8_t erased_value);
+ 
+ int armv7m_maybe_skip_bkpt_inst(struct target *target, bool *inst_found);
+ 
+diff --git a/src/target/cortex_m.c b/src/target/cortex_m.c
+index 21e5b59..9db6064 100644
+--- a/src/target/cortex_m.c
++++ b/src/target/cortex_m.c
+@@ -1900,12 +1900,16 @@ int cortex_m_examine(struct target *target)
+ 			return retval;
+ 		}
+ 
++		if (cortex_m->apsel < 0) {
+ 		/* Search for the MEM-AP */
+ 		retval = dap_find_ap(swjdp, AP_TYPE_AHB_AP, &armv7m->debug_ap);
+ 		if (retval != ERROR_OK) {
+ 			LOG_ERROR("Could not find MEM-AP to control the core");
+ 			return retval;
+ 		}
++		} else {
++			armv7m->debug_ap = dap_ap(swjdp, cortex_m->apsel);
++		}
+ 
+ 		/* Leave (only) generic DAP stuff for debugport_init(); */
+ 		armv7m->debug_ap->memaccess_tck = 8;
+@@ -2144,6 +2148,13 @@ static int cortex_m_target_create(struct target *target, Jim_Interp *interp)
+ 	cortex_m->common_magic = CORTEX_M_COMMON_MAGIC;
+ 	cortex_m_init_arch_info(target, cortex_m, target->tap);
+ 
++    if (target->private_config != NULL) {
++		struct adiv5_private_config *pc =
++				(struct adiv5_private_config *)target->private_config;
++		cortex_m->apsel = pc->ap_num;
++	} else
++		cortex_m->apsel = -1;
++
+ 	return ERROR_OK;
+ }
+ 
+@@ -2433,6 +2444,7 @@ struct target_type cortexm_target = {
+ 
+ 	.commands = cortex_m_command_handlers,
+ 	.target_create = cortex_m_target_create,
++	.target_jim_configure = adiv5_jim_configure,
+ 	.init_target = cortex_m_init_target,
+ 	.examine = cortex_m_examine,
+ 	.deinit_target = cortex_m_deinit_target,
+diff --git a/src/target/cortex_m.h b/src/target/cortex_m.h
+index 36414c7..6c8ed6d 100644
+--- a/src/target/cortex_m.h
++++ b/src/target/cortex_m.h
+@@ -191,6 +191,8 @@ struct cortex_m_common {
+ 	enum cortex_m_isrmasking_mode isrmasking_mode;
+ 
+ 	struct armv7m_common armv7m;
++    
++	int apsel;
+ };
+ 
+ static inline struct cortex_m_common *
+diff --git a/src/target/mips32.c b/src/target/mips32.c
+index 5a0e2a3..de5b5c8 100644
+--- a/src/target/mips32.c
++++ b/src/target/mips32.c
+@@ -775,7 +775,7 @@ int mips32_checksum_memory(struct target *target, uint32_t address,
+ 
+ /** Checks whether a memory region is zeroed. */
+ int mips32_blank_check_memory(struct target *target,
+-		uint32_t address, uint32_t count, uint32_t *blank)
++		uint32_t address, uint32_t count, uint32_t *blank, uint8_t erased_value)
+ {
+ 	struct working_area *erase_check_algorithm;
+ 	struct reg_param reg_params[3];
+@@ -812,7 +812,7 @@ int mips32_blank_check_memory(struct target *target,
+ 	buf_set_u32(reg_params[1].value, 0, 32, count);
+ 
+ 	init_reg_param(&reg_params[2], "r6", 32, PARAM_IN_OUT);
+-	buf_set_u32(reg_params[2].value, 0, 32, 0xff);
++	buf_set_u32(reg_params[2].value, 0, 32, erased_value);
+ 
+ 	int retval = target_run_algorithm(target, 0, NULL, 3, reg_params,
+ 			erase_check_algorithm->address,
+diff --git a/src/target/mips32.h b/src/target/mips32.h
+index 56f4fb4..08bbfe2 100644
+--- a/src/target/mips32.h
++++ b/src/target/mips32.h
+@@ -249,6 +249,6 @@ int mips32_get_gdb_reg_list(struct target *target,
+ int mips32_checksum_memory(struct target *target, uint32_t address,
+ 		uint32_t count, uint32_t *checksum);
+ int mips32_blank_check_memory(struct target *target,
+-		uint32_t address, uint32_t count, uint32_t *blank);
++		uint32_t address, uint32_t count, uint32_t *blank, uint8_t erased_value);
+ 
+ #endif	/*MIPS32_H*/
+diff --git a/src/target/nds32_cmd.c b/src/target/nds32_cmd.c
+index faf9e0a..ffd6061 100644
+--- a/src/target/nds32_cmd.c
++++ b/src/target/nds32_cmd.c
+@@ -846,7 +846,7 @@ static int jim_nds32_read_edm_sr(Jim_Interp *interp, int argc, Jim_Obj * const *
+ 	}
+ 
+ 	int e;
+-	char *edm_sr_name;
++	const char *edm_sr_name;
+ 	int edm_sr_name_len;
+ 	e = Jim_GetOpt_String(&goi, &edm_sr_name, &edm_sr_name_len);
+ 	if (e != JIM_OK)
+@@ -892,7 +892,7 @@ static int jim_nds32_write_edm_sr(Jim_Interp *interp, int argc, Jim_Obj * const
+ 	}
+ 
+ 	int e;
+-	char *edm_sr_name;
++	const char *edm_sr_name;
+ 	int edm_sr_name_len;
+ 	e = Jim_GetOpt_String(&goi, &edm_sr_name, &edm_sr_name_len);
+ 	if (e != JIM_OK)
+diff --git a/src/target/target.c b/src/target/target.c
+index 09dcf6f..1a4723e 100644
+--- a/src/target/target.c
++++ b/src/target/target.c
+@@ -2239,7 +2239,8 @@ int target_checksum_memory(struct target *target, uint32_t address, uint32_t siz
+ 	return retval;
+ }
+ 
+-int target_blank_check_memory(struct target *target, uint32_t address, uint32_t size, uint32_t* blank)
++int target_blank_check_memory(struct target *target, uint32_t address, uint32_t size, uint32_t* blank,
++	uint8_t erased_value)
+ {
+ 	int retval;
+ 	if (!target_was_examined(target)) {
+@@ -2250,7 +2251,7 @@ int target_blank_check_memory(struct target *target, uint32_t address, uint32_t
+ 	if (target->type->blank_check_memory == 0)
+ 		return ERROR_TARGET_RESOURCE_NOT_AVAILABLE;
+ 
+-	retval = target->type->blank_check_memory(target, address, size, blank);
++	retval = target->type->blank_check_memory(target, address, size, blank, erased_value);
+ 
+ 	return retval;
+ }
+@@ -4691,10 +4692,10 @@ no_params:
+ 
+ static int add_memory_mapping(Jim_GetOptInfo *goi, struct target *target)
+ {
+-	char *type_str;
++	const char *type_str;
+ 	enum memory_map_access type;
+-	char *short_name = NULL;
+-	char *long_name = NULL;
++	const char *short_name = NULL;
++	const char *long_name = NULL;
+ 	int64_t start_addr;
+ 	int64_t size;
+ 	int retval;
+@@ -5378,7 +5379,6 @@ static int target_create(Jim_GetOptInfo *goi)
+ 	Jim_Obj *new_cmd;
+ 	Jim_Cmd *cmd;
+ 	const char *cp;
+-	char *cp2;
+ 	int e;
+ 	int x;
+ 	struct target *target;
+@@ -5403,10 +5403,9 @@ static int target_create(Jim_GetOptInfo *goi)
+ 	}
+ 
+ 	/* TYPE */
+-	e = Jim_GetOpt_String(goi, &cp2, NULL);
++	e = Jim_GetOpt_String(goi, &cp, NULL);
+ 	if (e != JIM_OK)
+ 		return e;
+-	cp = cp2;
+ 	struct transport *tr = get_current_transport();
+ 	if (tr->override_target) {
+ 		e = tr->override_target(&cp);
+diff --git a/src/target/target.h b/src/target/target.h
+index 7079d42..b3da538 100644
+--- a/src/target/target.h
++++ b/src/target/target.h
+@@ -189,6 +189,7 @@ struct target {
+ 	struct debug_msg_receiver *dbgmsg;	/* list of debug message receivers */
+ 	uint32_t dbg_msg_enabled;			/* debug message status */
+ 	void *arch_info;					/* architecture specific information */
++	void *private_config;				/* pointer to target specific config data (for jim_configure hook) */
+ 	struct target *next;				/* next target in list */
+ 
+ 	int display;						/* display async info in telnet session. Do not display
+@@ -602,7 +603,7 @@ int target_read_buffer(struct target *target,
+ int target_checksum_memory(struct target *target,
+ 		uint32_t address, uint32_t size, uint32_t *crc);
+ int target_blank_check_memory(struct target *target,
+-		uint32_t address, uint32_t size, uint32_t *blank);
++		uint32_t address, uint32_t size, uint32_t *blank, uint8_t erased_value);
+ int target_wait_state(struct target *target, enum target_state state, int ms);
+ 
+ /**
+diff --git a/src/target/target_type.h b/src/target/target_type.h
+index 234cdfb..5b6739c 100644
+--- a/src/target/target_type.h
++++ b/src/target/target_type.h
+@@ -133,7 +133,7 @@ struct target_type {
+ 	int (*checksum_memory)(struct target *target, uint32_t address,
+ 			uint32_t count, uint32_t *checksum);
+ 	int (*blank_check_memory)(struct target *target, uint32_t address,
+-			uint32_t count, uint32_t *blank);
++			uint32_t count, uint32_t *blank, uint8_t erased_value);
+ 
+ 	/*
+ 	 * target break-/watchpoint control
+diff --git a/tcl/target/psoc4.cfg b/tcl/target/psoc4.cfg
+index 2416dbe..d443b01 100644
+--- a/tcl/target/psoc4.cfg
++++ b/tcl/target/psoc4.cfg
+@@ -127,7 +127,7 @@ proc ocd_process_reset_inner { MODE } {
+ 		set pc [ocd_reg pc]
+ 		regsub {pc[^:]*: } $pc "" pc
+ 		if { $pc < 0x10000000 || $pc > 0x1000ffff } {
+-			return -code error [format "TARGET: %s - Not halted is system ROM" $t]
++			return -code error [format "TARGET: %s - Not halted in system ROM, use 'reset_config none'" $t]
+ 		}
+ 
+ 		# Set registers to reset vector values
+diff --git a/tcl/target/psoc5lp.cfg b/tcl/target/psoc5lp.cfg
+new file mode 100644
+index 0000000..1cdde47
+--- /dev/null
++++ b/tcl/target/psoc5lp.cfg
+@@ -0,0 +1,32 @@
++#
++# Cypress PSoC 5LP
++#
++
++source [find target/swj-dp.tcl]
++
++if { [info exists CHIPNAME] } {
++	set _CHIPNAME $CHIPNAME
++} else {
++	set _CHIPNAME psoc5lp
++}
++
++if { [info exists CPUTAPID] } {
++	set _CPU_TAPID $CPUTAPID
++} else {
++	set _CPU_TAPID 0x4BA00477
++}
++
++if { [using_jtag] } {
++	set _CPU_DAP_ID $_CPU_TAPID
++} else {
++	set _CPU_DAP_ID 0x2ba01477
++}
++
++swj_newdap $_CHIPNAME cpu -irlen 4 -expected-id $_CPU_DAP_ID
++
++set _TARGETNAME $_CHIPNAME.cpu
++target create $_TARGETNAME cortex_m -chain-position $_TARGETNAME
++
++if {![using_hla]} {
++	cortex_m reset_config sysresetreq
++}
+diff --git a/tcl/target/psoc6.cfg b/tcl/target/psoc6.cfg
+new file mode 100644
+index 0000000..60d9178
+--- /dev/null
++++ b/tcl/target/psoc6.cfg
+@@ -0,0 +1,151 @@
++source [find target/swj-dp.tcl]
++
++adapter_khz 3000
++
++global CORE_ID
++if { [info exists CORE] } {
++   set CORE_ID $CORE
++} else {
++   set CORE_ID M0 
++}
++
++echo [format "CORE in %s" $CORE_ID]
++
++global _CHIPNAME
++if { [info exists CHIPNAME] } {
++   set _CHIPNAME $CHIPNAME
++} else {
++   set _CHIPNAME psoc6
++}
++
++# Work-area is a space in RAM used for flash programming
++# By default use 16kB
++global _WORKAREASIZE
++if { [info exists WORKAREASIZE] } {
++   set _WORKAREASIZE $WORKAREASIZE
++} else {
++   set _WORKAREASIZE 0x4000
++}
++
++global _TAPID
++if { [info exists M0_TAPID] } {
++   set _TAPID $M0_TAPID
++} else {
++   set _TAPID 0x6BA02477
++}
++
++swj_newdap $_CHIPNAME cpu -irlen 4 -ircapture 0x1 -irmask 0xf -expected-id $_TAPID
++
++global TARGET
++set TARGET $_CHIPNAME.cpu
++
++if { 0 == [string compare $CORE_ID M4] } {
++target create $TARGET cortex_m -chain-position $TARGET -ap-num 2
++echo [format "CORE_ID in %s" $CORE_ID]
++} else {
++target create $TARGET cortex_m -chain-position $TARGET -ap-num 1
++echo [format "CORE_ID in %s" $CORE_ID]
++}
++
++$TARGET configure -work-area-phys 0x08002000 -work-area-size $_WORKAREASIZE -work-area-backup 0 
++
++$TARGET configure -event gdb-attach {
++echo [format "GDB_ATTACH_BEFORE_CPU in %s" [$TARGET curstate]]
++reset init
++echo [format "GDB_ATTACH_AFTER_CPU in %s" [$TARGET curstate]]
++
++echo [format "APSEL in %s" $TARGET dap apsel]
++
++}
++
++set _FLASHNAME $_CHIPNAME.flash
++flash bank $_FLASHNAME psoc6 0x10000000 0 0 0 $TARGET
++
++if {![using_hla]} {
++   cortex_m reset_config sysresetreq
++}
++
++proc mread32 {addr} {
++  set value(0) 0
++  mem2array value 32 $addr 1
++  return $value(0)
++}
++
++proc ocd_process_reset_inner { MODE } {
++	if { 0 != [string compare psoc6.cpu [target names]] } {
++		return -code error "PSoC 6 reset can handle only one psoc6.cpu target";
++	}
++	set target psoc6.cpu
++
++    echo [format "APSEL - 1 in %s" [$target dap apsel]]
++
++	# If this target must be halted...
++	set halt -1
++	if { 0 == [string compare $MODE halt] } {
++		set halt 1
++	}
++	if { 0 == [string compare $MODE init] } {
++		set halt 1;
++	}
++	if { 0 == [string compare $MODE run ] } {
++		set halt 0;
++	}
++	if { $halt < 0 } {
++		return -code error "Invalid mode: $MODE, must be one of: halt, init, or run";
++	}
++
++    $target invoke-event reset-assert-pre
++	$target arp_reset assert 0
++	$target invoke-event reset-assert-post
++	$target invoke-event reset-deassert-pre
++	if {![using_hla]} {	# workaround ST-Link v2 fails and forcing reconnect
++		$target arp_reset deassert 0
++	}
++	$target invoke-event reset-deassert-post
++    
++	#Pass 2 - if needed "init"
++	if { 0 == [string compare init $MODE] } {
++		set err [catch "$target arp_waitstate halted 5000"]
++		#Did it halt?
++		if { $err == 0 } {
++			$target invoke-event reset-init
++		}
++        
++	}
++	$target invoke-event reset-end
++    
++    # Pass 1 - Now wait for any halt (requested as part of reset
++	# assert/deassert) to happen.  Ideally it takes effect without
++	# first executing any instructions.
++	if { $halt == 1 } {
++
++        echo "Verify the debug enable, cpu halt bits are set"
++        set halted [mread32 0xE000EDF0]
++        echo [format "OCD_PROCESS_RESET_INNER FORMAT HALTED IN 0x%x" $halted]
++        if { 0x00000003 != [expr ($halted & 0x00000003)] } {
++          return 
++        }
++
++        echo "Load infinite for loop code in SRAM address"
++        mww 0x08001010 0xE7FEE7FE
++               
++        echo "Load PC with address of infinite for loop SRAM address"
++        reg pc 0x08001011
++               
++        echo "Load LR with address of infinite for loop SRAM address"
++        reg lr 0x08001010
++               
++        echo "Load SP with top of SRAM address"
++        reg sp 0x0801C000
++        
++        echo "Read xPSR register, set the thumb bit, and restore modified value to xPSR register"
++        set xPSR [ocd_reg xPSR]
++        regsub {xPSR[^:]*: } $xPSR "" xPSR
++        set xPSR [expr ($xPSR | 0x01000000)]
++        echo [format "FORMAT xPSR in 0x%x" $xPSR]
++        reg xPSR $xPSR
++        
++        resume
++    }
++    echo [format "APSEL - 2 in %s" [$target dap apsel]]
++}
+-- 
+1.9.5.msysgit.0
+
